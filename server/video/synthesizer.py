@@ -122,6 +122,43 @@ def get_video_info(video_path):
     }
 
 
+def remove_green_background(video_path, output_path):
+    """
+    Remove green screen background from video using chromakey filter
+
+    Args:
+        video_path (str): Input video file path with green background
+        output_path (str): Output video file path with transparent background
+
+    Returns:
+        str: Output video file path
+    """
+    print(f"Removing green background from video: {video_path}")
+
+    cmd = [
+        'ffmpeg',
+        '-y',  # Overwrite output file
+        '-i', video_path,
+        '-vf', 'chromakey=0x00ff00:0.3:0.2,format=yuva420p',
+        '-c:v', 'libvpx-vp9',  # VP9 codec supports alpha channel
+        '-pix_fmt', 'yuva420p',
+        '-b:v', '2M',
+        '-c:a', 'libopus',  # Use Opus audio codec for WebM
+        '-b:a', '128k',
+        '-auto-alt-ref', '0',  # Disable alt-ref frames for VP9 (better compatibility)
+        output_path
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        print(f"FFmpeg green screen removal stderr: {result.stderr}")
+        raise RuntimeError(f"Green screen removal failed with return code {result.returncode}")
+
+    print(f"Green background removed successfully: {output_path}")
+    return output_path
+
+
 def srt_to_ass(srt_path, ass_path, font_name='STHeiti Medium'):
     """
     Convert SRT subtitle to ASS format with Chinese font support
@@ -199,23 +236,27 @@ def process_single_segment(image_path, audio_path, output_path, video_path=None,
     # Build FFmpeg command
     # Base: create video from image with audio
     if video_path:
-        # Complex filter for overlaying digital human video
+        # Complex filter for overlaying digital human video with green screen removal
         # 1. Create background video from image
-        # 2. Loop/trim digital human video to match audio duration
-        # 3. Scale digital human video to 1/5 of background width
-        # 4. Overlay at bottom-right corner
+        # 2. Apply chromakey filter to digital human video to remove green background
+        # 3. Loop/trim digital human video to match audio duration
+        # 4. Scale digital human video to 1/5 of background width
+        # 5. Overlay at bottom-right corner
 
         # First, get video info to calculate scaling
         video_info = get_video_info(video_path)
 
-        # Build complex filter
+        # Build complex filter with inline chromakey
+        # Chromakey parameters balanced for removing green background while preserving the person:
+        # - similarity: 0.25 (moderate - removes green background but preserves person)
+        # - blend: 0.1 (moderate edge blending)
         filter_complex = (
             # Input 0 (image): loop and scale to create background
             "[0:v]loop=loop=-1:size=1:start=0,scale=1920:1080,setsar=1,fps=24[bg];"
-            # Input 1 (digital human video): trim or loop to match duration
-            f"[1:v]trim=duration={audio_duration},setpts=PTS-STARTPTS,"
-            # Scale to 1/5 of background width (384 pixels), maintain aspect ratio
-            "scale=384:-1[human];"
+            # Input 1 (digital human video): apply chromakey with balanced parameters, trim or loop to match duration, scale
+            f"[1:v]chromakey=0x00ff00:0.25:0.1,trim=duration={audio_duration},setpts=PTS-STARTPTS,"
+            # Scale to 3/20 of background width (288 pixels), maintain aspect ratio
+            "scale=288:-1[human];"
             # Overlay human video on background at bottom-right with 20px padding
             "[bg][human]overlay=W-w-20:H-h-20[outv]"
         )
@@ -225,7 +266,7 @@ def process_single_segment(image_path, audio_path, output_path, video_path=None,
             '-y',  # Overwrite output file
             '-loop', '1',  # Loop image
             '-i', image_path,  # Input 0: background image
-            '-i', video_path,  # Input 1: digital human video
+            '-i', video_path,  # Input 1: digital human video (with green background)
             '-i', audio_path,  # Input 2: audio
             '-filter_complex', filter_complex,
             '-map', '[outv]',  # Use filtered video
